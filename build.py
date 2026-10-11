@@ -83,6 +83,13 @@ def make_tts():
     except Exception as e:
         print('Voice engine unavailable, the page will use its own voice:', repr(e)); return None
 
+def asx_list():
+    if FAKE: return [['BHP', 'BHP Group', 'Common Stock'], ['TST', 'Test Mining Ltd', 'Common Stock'], ['TSE', 'Test ETF', 'ETF'], ['TLS', 'Telstra Group Ltd', 'Common Stock']]
+    q = urllib.parse.urlencode({'fmt': 'json', 'api_token': KEY})
+    with urllib.request.urlopen(f'https://eodhd.com/api/exchange-symbol-list/AU?{q}', timeout=60) as r:
+        data = json.load(r)
+    return [[o['Code'], o['Name'], o['Type']] for o in data if o.get('Code') and o.get('Name') and o.get('Type') in ('Common Stock', 'ETF')]
+
 def main():
     stocks, fails = [], []
     for t, n in watchlist():
@@ -98,6 +105,9 @@ def main():
     shutil.copy(os.path.join(ROOT, 'index.html'), os.path.join(SITE, 'index.html'))
     stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
     json.dump({'updated': stamp, 'stocks': stocks, 'failed': fails}, open(os.path.join(SITE, 'data', 'prices.json'), 'w'))
+    if len(stocks) < 20:   # the company list costs 1 EODHD call, so skip it if you use all 20 free calls on prices
+        try: json.dump(asx_list(), open(os.path.join(SITE, 'data', 'asx.json'), 'w'), separators=(',', ':'))
+        except Exception as e: print('Company list not updated:', repr(e))
     say = make_tts(); bul = {'updated': stamp, 'for': max(r[0] for s in stocks for r in s['rows'][-1:])}
     for per, name in (('d', 'daily'), ('w', 'weekly')):
         sc = scenes(stocks, per)
