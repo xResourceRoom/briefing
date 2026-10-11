@@ -77,6 +77,7 @@ details{margin-top:8px}summary{cursor:pointer}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .qf{display:grid;gap:4px;margin-top:6px}.qf input{min-height:32px;padding:4px 8px}
 .row2{display:flex;gap:8px}.row2 input{flex:1}.srch{margin:0 0 16px}.srl{list-style:none;margin:8px 0;padding:0;border:1px solid var(--bd);border-radius:6px;background:var(--sf)}.srl li{border-top:1px solid var(--bd)}.srl li:first-child{border-top:0}.srl button{width:100%;text-align:left;border:0;background:none;padding:10px 12px;min-height:44px;font-weight:500}.srl button:hover{background:var(--bg)}
+.daily .srch,.daily #af,.daily #aerr,.daily [data-rm],.daily [data-pr],.daily .qf,.daily #rf,.daily #rfn{display:none}#dnote{display:none}.daily #dnote{display:block}
 </style>
 </head>
 <body>
@@ -92,6 +93,7 @@ details{margin-top:8px}summary{cursor:pointer}
     <section id="v-watchlist" hidden>
       <h2>Your watchlist</h2>
       <p class="mu">Add the companies you want to follow. Nothing else is tracked.</p>
+      <p id="dnote" class="sm mu">Your watchlist is the file <b>watchlist.txt</b> in your GitHub repository. Edit that file to add or remove stocks (one per line, like <b>BHP, BHP Group</b>). The next daily run picks it up.</p>
       <div class="srch"><label for="sq">Find any ASX company</label>
         <div class="row2"><input id="sq" placeholder="Type part of a company name or code, then press Search" autocomplete="off" spellcheck="false"><button id="sb" type="button" class="pri">Search</button></div>
         <p id="sn" class="sm mu" role="status"></p><ul id="sr" class="srl" hidden></ul></div>
@@ -244,7 +246,7 @@ if(dm)L.push(`<b>${dm===st.stocks.length?'All prices shown are demo prices':dm+'
 if(sl)L.push(`<b>${sl} ${sl===1?'stock is':'stocks are'} behind.</b> The latest close is ${nice(ex)}, and ${sl===1?'its':'their'} newest price is older. Use “Add close” on the Tracking page.`);
 const s=syd();L.push(`<span class="mu">${s.wk==='Sat'||s.wk==='Sun'?`The ASX is closed on weekends. This page shows the last close, ${nice(ex)}.`:closed()?`The ASX has closed. This page shows today's close, ${nice(ex)}.`:`Today's close is not in yet (the ASX closes at 4pm Sydney time). This page shows the last close, ${nice(ex)}.`}</span>`);
 if(fs.t)L.push(`<span class="${fs.c}">${esc(fs.t)}</span>`);
-b.hidden=false;b.innerHTML=L.map(x=>`<p style="margin:0 0 4px">${x}</p>`).join('');$('#ver').textContent=`Standalone version 1. Price service: ${mcp?'key saved':'no key yet'}. Calls this page made today: ${used()} of ${LIMIT}.`}
+b.hidden=false;b.innerHTML=L.map(x=>`<p style="margin:0 0 4px">${x}</p>`).join('');$('#ver').textContent=`Standalone version 3 (daily job). Price service: ${mcp?'key saved':'no key yet'}. Calls this page made today: ${used()} of ${LIMIT}.`}
 function watchlist(){$('#wl').innerHTML=st.stocks.length?`<table><thead><tr><th>Company</th><th>Ticker</th><th>Exchange</th><th>Why you follow it</th><th>Prices</th><th></th></tr></thead><tbody>${st.stocks.map(s=>`<tr><td>${esc(s.n)}</td><td><b>${esc(s.t)}</b></td><td>${esc(s.x)}</td><td>${esc(s.note||'—')}</td><td>${isReal(s.t)?'Real, to '+(info(s).at?nice(info(s).at):'none yet'):'Demo'}</td><td><button class="sml dng" data-rm="${esc(s.t)}">${armed===s.t?'Sure? Remove':'Remove'}</button></td></tr>`).join('')}</tbody></table>`:'<p class="empty">Your watchlist is empty. Add a company above to start.</p>'}
 const quick=s=>{if(!s.real)return'';const ex=expected();if(s.at&&s.at>=ex)return'<div class="sm mu" style="margin-top:6px">Up to date</div>';return`<form data-q="${esc(s.t)}" class="qf"><label class="sr" for="q-${esc(s.t)}">Closing price for ${esc(s.t)} on ${nice(ex)}</label><input id="q-${esc(s.t)}" inputmode="decimal" placeholder="Close ${nice(ex)}" autocomplete="off"><button class="sml pri" type="submit">Add close</button></form>`};
 function tracking(){$('#rf').disabled=!mcp||running;$('#rfn').textContent=mcp?`Uses 1 free call for each ASX stock that is behind. About ${Math.max(0,LIMIT-used())} left today.`:'Add your EODHD key in Settings.';const A=all();const up=A.filter(s=>s.d>=.5).length,dn=A.filter(s=>s.d<=-.5).length,bg=A.filter(s=>big(s.d,1)||big(s.w,7)).length;
@@ -272,7 +274,8 @@ $('#cu').innerHTML=st.stocks.length?all().map(s=>{const p=per==='d'?s.d:s.w,Q=sa
 $('#addn').disabled=!st.stocks.length;$('#pd').setAttribute('aria-pressed',String(per==='d'));$('#pw').setAttribute('aria-pressed',String(per==='w'));renderScript()}
 
 /* ---- bulletin ---- */
-function scenes(){const M=moves(),w=per==='d'?'today':'this week',days=per==='d'?1:7,out=[];if(!M.length)return out;
+function scenes(){
+const BK=per==='d'?'daily':'weekly';if(BUL&&BUL.for&&BUL[BK]&&BUL[BK].scenes&&BUL[BK].scenes.length){const M=moves();if(M.length)return BUL[BK].scenes.map(x=>{if(x.k==='c'){const s=M.find(m=>m.t===x.t)||M[0];return{k:'c',s,say:x.say,audio:x.audio}}if(x.k==='h')return{k:'h',rows:M.slice(0,5),say:x.say,audio:x.audio};return{k:'p',h:x.h,s:x.s||'',say:x.say,audio:x.audio}})}const M=moves(),w=per==='d'?'today':'this week',days=per==='d'?1:7,out=[];if(!M.length)return out;
 const dem=M.some(s=>!s.real),up=M.filter(s=>s.p>=.5).length,dn=M.filter(s=>s.p<=-.5).length,bg=M.filter(s=>big(s.p,days));
 const dt=new Date().toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long'});
 out.push({k:'p',h:per==='d'?'Daily closing summary':'Weekly summary',s:dt,say:`${closed()?'Good evening':'Hello'}. Here is your ${per==='d'?'daily closing':'weekly'} stock update for ${dt}.`});
@@ -304,10 +307,10 @@ if(!voice){mouth(true);return}
 const one=()=>{if(fin||tok!==bt)return;if(i>=chunks.length){next();return}
 try{const u=new SpeechSynthesisUtterance(spoken(chunks[i++])),v=pickVoice();if(v){u.voice=v;u.lang=v.lang}else u.lang='en-AU';u.rate=.95;u.pitch=1;u.onstart=()=>mouth(true);u.onend=()=>{mouth(false);setTimeout(one,220)};u.onerror=()=>{mouth(false);setTimeout(one,220)};SY.speak(u)}catch(e){mouth(true)}};
 try{SY.cancel()}catch(e){}one()}
-function run(i,sc,tok){if(tok!==bt)return;if(i>=sc.length){stop();return}show(sc[i],i,sc.length);speak(sc[i].say,()=>run(i+1,sc,tok),tok)}
+function run(i,sc,tok){if(tok!==bt)return;if(i>=sc.length){stop();return}show(sc[i],i,sc.length);speak(sc[i].say,()=>run(i+1,sc,tok),tok,sc[i].audio)}
 function stop(q){bt++;playing=false;try{KOK.cur&&KOK.cur.pause()}catch(e){}try{SY&&SY.cancel()}catch(e){}mouth(false);$('#pl').textContent='Play bulletin';if(!q)idle()}
 $('#pl').onclick=async()=>{if(playing){stop();return}const sc=scenes();if(!sc.length)return;playing=true;$('#pl').textContent='Stop';const tok=++bt;
-if(KOK.eng==='kokoro'&&!KOK.failed){try{for(let i=0;i<sc.length;i++){$('#pg').textContent=`Preparing the voice… ${i+1} of ${sc.length}`;await kokoSay(sc[i].say);if(tok!==bt)return}}catch(e){kokoFail(e)}}
+if(KOK.eng==='kokoro'&&!KOK.failed&&!sc[0].audio){try{for(let i=0;i<sc.length;i++){$('#pg').textContent=`Preparing the voice… ${i+1} of ${sc.length}`;await kokoSay(sc[i].say);if(tok!==bt)return}}catch(e){kokoFail(e)}}
 if(tok===bt)run(0,sc,tok)};
 
 /* ---- routing ---- */
@@ -372,13 +375,13 @@ addUsed(1);const r=await mcp.callTool(SRV,TOOL,{ticker:s.t+'.AU',start_date:star
 let p=r&&r.payload;if(typeof p==='string'){try{p=JSON.parse(p)}catch(e){p=[]}}const rows=Array.isArray(p)?p:(p&&(p.data||p.result||p.rows))||[];
 const add=rows.filter(o=>o&&/^\d{4}-\d{2}-\d{2}$/.test(o.date)&&+o.close>0&&o.date<=cutoff()).map(o=>[o.date,+o.close]);if(!add.length)return 0;
 const m=new Map((st.real[s.t]||[]).map(x=>[x[0],x[1]]));for(const[d,c]of add)m.set(d,c);st.real[s.t]=[...m].sort((a,b)=>a[0]<b[0]?-1:1).slice(-400);save();return add.length}
-async function refresh(force){if(running||!mcp)return;const ex=expected();
+async function refresh(force){if(running||!mcp||DAILY)return;if(!force&&localStorage.getItem('wlb:blocked')===utc())return;const ex=expected();
 let todo=all().filter(s=>s.x==='ASX'&&(!s.real||!s.at||s.at<ex)&&(force||st.tried[s.t]!==ex));if(!todo.length){if(force)setF('Everything is already up to date.');return}
 const room=LIMIT-used();if(room<=0){setF('The free plan allows 20 calls a day and this page has used them. It resets at 11am Sydney time.','dn');return}
 const cut=todo.length>room;todo=todo.slice(0,room);running=true;setF(`Getting closing prices for ${todo.length} ${todo.length===1?'stock':'stocks'}…`);if(!$('#v-tracking').hidden)tracking();
 const errs=[];let stopped=false;
 for(const s of todo){st.tried[s.t]=ex;save();try{if(!(await pull(s)))errs.push(`${s.t}: no new price yet`)}
-catch(e){const c=e&&e.code;if(FAIL[c]){setF(FAIL[c],'dn');stopped=true;break}const msg=c==='tool_error'?String(e.message||'EODHD refused the request').slice(0,120):c==='server_unavailable'||c==='upstream_error'||c==='rate_limited'?'EODHD did not answer':'failed ('+(c||'unknown')+')';errs.push(`${s.t}: ${msg}`);if(c==='tool_error'&&/limit|quota|exceed|too many/i.test(msg))break}}
+catch(e){const c=e&&e.code;if(FAIL[c]){setF(FAIL[c],'dn');stopped=true;break}const msg=c==='tool_error'?String(e.message||'EODHD refused the request').slice(0,120):c==='server_unavailable'||c==='upstream_error'||c==='rate_limited'?'EODHD did not answer':'failed ('+(c||'unknown')+')';if(/blocked the request/.test(msg)){try{localStorage.setItem('wlb:blocked',utc())}catch(e){}setF('EODHD does not allow this page to fetch prices directly (a browser security rule), so no prices were fetched. Paste prices or use “Add close” for now. I will not retry automatically today.','dn');stopped=true;break}errs.push(`${s.t}: ${msg}`);if(c==='tool_error'&&/limit|quota|exceed|too many/i.test(msg))break}}
 running=false;
 if(!stopped){const A=all().filter(s=>s.x==='ASX'),beh=A.filter(s=>!s.real||!s.at||s.at<ex).length,tm=new Date().toLocaleTimeString('en-AU',{timeZone:'Australia/Sydney',hour:'2-digit',minute:'2-digit',hour12:false});
 if(errs.length)setF(`Some prices could not be updated: ${errs.join('; ')}. Try “Refresh closing prices” later.`,'dn');
@@ -423,20 +426,23 @@ const KOK={eng:'kokoro',voice:'bm_george',tts:null,failed:false,cur:null,cache:n
 try{KOK.eng=localStorage.getItem('wlb:eng')||'kokoro';KOK.voice=localStorage.getItem('wlb:kv')||'bm_george'}catch(e){}
 const KMSG=m=>{$('#kms').textContent=m};
 function kokoFail(e){KOK.failed=true;const m='The realistic voice did not work ('+String((e&&e.message)||e).slice(0,90)+'). Using the device voice.';KMSG(m);$('#pg').textContent=m}
+const withTimeout=(p,ms,msg)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg)),ms))]);
+const stage=m=>{KMSG(m);$('#pg').textContent=m};
 async function kokoLoad(){if(KOK.tts)return KOK.tts;if(KOK.loading)return KOK.loading;
-KOK.loading=(async()=>{const {KokoroTTS}=await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');const id='onnx-community/Kokoro-82M-v1.0-ONNX';
-const prog=p=>{if(p&&p.status==='progress'&&p.progress!=null){const m=`Downloading the voice… ${Math.round(p.progress)}% (first time only)`;$('#pg').textContent=m;KMSG(m)}};
-try{if(!navigator.gpu)throw 0;KOK.tts=await KokoroTTS.from_pretrained(id,{dtype:'fp32',device:'webgpu',progress_callback:prog})}
-catch(e){KOK.tts=await KokoroTTS.from_pretrained(id,{dtype:'q8',device:'wasm',progress_callback:prog})}
+KOK.loading=(async()=>{stage('Loading the voice engine…');const {KokoroTTS}=await withTimeout(import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm'),90000,'the voice engine did not load');const id='onnx-community/Kokoro-82M-v1.0-ONNX';
+const prog=p=>{if(p&&p.status==='progress'&&p.progress!=null)stage(p.progress>=99.5?'Download finished. Starting the voice, this can take a few minutes on a tablet…':`Downloading the voice… ${Math.round(p.progress)}% (first time only)`)};
+KOK.tts=await withTimeout(KokoroTTS.from_pretrained(id,{dtype:'q8',device:'wasm',progress_callback:prog}),300000,'the voice took too long to start');
 return KOK.tts})();
 try{return await KOK.loading}finally{KOK.loading=null}}
-async function kokoSay(text){const key=KOK.voice+'|'+text;if(KOK.cache.has(key))return KOK.cache.get(key);const tts=await kokoLoad();let a;
-try{a=await tts.generate(spoken(text),{voice:KOK.voice})}catch(e){a=await tts.generate(spoken(text),{voice:'af_heart'})}
+async function kokoSay(text){const key=KOK.voice+'|'+text;if(KOK.cache.has(key))return KOK.cache.get(key);const tts=await kokoLoad();let a;stage('Making the speech…');
+try{a=await withTimeout(tts.generate(spoken(text),{voice:KOK.voice}),180000,'making the speech took too long')}catch(e){if(/too long/.test(e.message))throw e;a=await withTimeout(tts.generate(spoken(text),{voice:'af_heart'}),180000,'making the speech took too long')}
 const url=URL.createObjectURL(await a.toBlob());KOK.cache.set(key,url);return url}
 async function kokoPlay(text,done,tok){let fin=false;const next=()=>{if(fin||tok!==bt)return;fin=true;mouth(false);setTimeout(done,400)};
 try{const url=await kokoSay(text);if(tok!==bt)return;const a=new Audio(url);KOK.cur=a;a.onplay=()=>mouth(true);a.onended=next;a.onerror=()=>{KOK.failed=true;speakDevice(text,done,tok)};await a.play()}
 catch(e){kokoFail(e);speakDevice(text,done,tok)}}
-function speak(text,done,tok){if(KOK.eng==='kokoro'&&!KOK.failed)kokoPlay(text,done,tok);else speakDevice(text,done,tok)}
+const fallbackSpeak=(text,done,tok)=>{if(KOK.eng==='kokoro'&&!KOK.failed)kokoPlay(text,done,tok);else speakDevice(text,done,tok)};
+function playFile(url,text,done,tok){let fin=false;const next=()=>{if(fin||tok!==bt)return;fin=true;mouth(false);setTimeout(done,400)};const a=new Audio(url);KOK.cur=a;a.onplay=()=>mouth(true);a.onended=next;a.onerror=()=>{if(fin)return;fin=true;fallbackSpeak(text,done,tok)};a.play().catch(()=>{if(fin)return;fin=true;fallbackSpeak(text,done,tok)})}
+function speak(text,done,tok,audio){if(audio)playFile(audio,text,done,tok);else fallbackSpeak(text,done,tok)}
 $('#eng').value=KOK.eng;$('#kv').value=KOK.voice;
 $('#eng').onchange=()=>{KOK.eng=$('#eng').value;KOK.failed=false;try{localStorage.setItem('wlb:eng',KOK.eng)}catch(e){}};
 $('#kv').onchange=()=>{KOK.voice=$('#kv').value;try{localStorage.setItem('wlb:kv',KOK.voice)}catch(e){}};
@@ -444,11 +450,18 @@ $('#kt').onclick=async()=>{stop(true);KOK.failed=false;KMSG('Preparing…');try{
 $('#ksv').onclick=()=>{const v=$('#key').value.trim();if(!v){$('#kst').textContent='Paste your key first.';return}try{localStorage.setItem('wlb:key',v)}catch(e){$('#kst').textContent='This browser would not save the key.';return}$('#kst').textContent='Saved. Reloading…';setTimeout(()=>location.reload(),400)};
 (()=>{try{const k=localStorage.getItem('wlb:key');if(k)$('#kst').textContent=`A key ending ${k.slice(-4)} is saved on this device. Paste a new one to replace it.`}catch(e){}})();
 
+/* ---- daily data built by the GitHub job (prices, script and audio) ---- */
+let DAILY=false,BUL=null;
+function applyDaily(d){if(!d||!Array.isArray(d.stocks)||!d.stocks.length)return;DAILY=true;document.body.classList.add('daily');
+st.stocks=d.stocks.map(s=>({t:s.t,n:s.n||s.t,x:'ASX',note:''}));st.real={};for(const s of d.stocks)if(Array.isArray(s.rows)&&s.rows.length)st.real[s.t]=s.rows;st.tried={};save();
+const when=d.updated?new Date(d.updated).toLocaleString('en-AU',{timeZone:'Australia/Sydney',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}):'';
+setF(`Prices and the bulletin come from your daily job${when?' (updated '+when+' Sydney time)':''}.${d.failed&&d.failed.length?' Not updated: '+d.failed.join('; ')+'.':''}`)}
 /* ---- start ---- */
 $('#pd').onclick=()=>{per='d';roundup()};$('#pw').onclick=()=>{per='w';roundup()};
 $('#today').textContent=new Date().toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 let lastC=closed();setInterval(()=>{const c=closed();if(c!==lastC){lastC=c;if(!document.querySelector('dialog[open]'))route();refresh(false)}},30000);
-route();
+(async()=>{try{const r=await fetch('data/prices.json',{cache:'no-store'});if(r.ok)applyDaily(await r.json())}catch(e){}
+try{const r=await fetch('data/bulletin.json',{cache:'no-store'});if(r.ok)BUL=await r.json()}catch(e){}route()})();
 </script>
 </body>
 </html>
