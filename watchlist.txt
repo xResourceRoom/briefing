@@ -1,0 +1,5 @@
+BHP, BHP Group
+CBA, Commonwealth Bank of Australia
+CSL, CSL Limited
+TLS, Telstra Group
+WOW, Woolworths Group
