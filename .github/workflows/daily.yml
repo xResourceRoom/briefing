@@ -7,6 +7,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  models: read
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -29,6 +30,7 @@ jobs:
       - name: Fetch prices, write the script, make the voice
         env:
           EODHD_KEY: ${{ secrets.EODHD_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
