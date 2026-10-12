@@ -31,6 +31,7 @@ jobs:
         env:
           EODHD_KEY: ${{ secrets.EODHD_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SECRETS_JSON: ${{ toJSON(secrets) }}
         run: python build.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
