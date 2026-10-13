@@ -6,7 +6,7 @@ SYD = ZoneInfo('Australia/Sydney'); ROOT = os.path.dirname(os.path.abspath(__fil
 try: SECRETS = json.loads(os.environ.get('SECRETS_JSON') or '{}')
 except Exception: SECRETS = {}
 KEY = os.environ.get('EODHD_KEY') or SECRETS.get('EODHD_KEY', ''); FAKE = os.environ.get('EODHD_FAKE') == '1'; TTS = os.environ.get('TTS', 'on'); VOICE = os.environ.get('VOICE', 'bm_george')
-NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', '')
+NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1-mini'); WRITER_MODEL = os.environ.get('WRITER_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', '')
 
 def watchlist():
     out = []
@@ -47,7 +47,7 @@ def chg(rows, days):
 def spoken(s):   # read initialisms letter by letter (BHP, ANZ), a few as words
     return re.sub(r'\b[A-Z]{2,4}\b', lambda m: m.group(0) if m.group(0) in ('NAB', 'REA') else ' '.join(m.group(0)), s)
 
-def scenes(stocks, per, news):
+def scenes(stocks, per, news, script=None):
     days, w = (1, 'today') if per == 'd' else (7, 'this week')
     M = sorted([(s, chg(s['rows'], days)) for s in stocks if chg(s['rows'], days) is not None], key=lambda x: -x[1])
     if not M: return []
@@ -56,6 +56,14 @@ def scenes(stocks, per, news):
     top, tp = max(M, key=lambda x: abs(x[1]))
     date = now.strftime('%A ') + str(now.day) + now.strftime(' %B')
     title = 'Daily closing summary' if per == 'd' else 'Weekly summary'
+    if script:
+        out = [{'k': 'p', 'h': 'Daily closing wrap' if per == 'd' else 'Weekly stock market wrap', 's': date, 'say': script['intro']}]
+        for sg in script['segments']:
+            for j, par in enumerate(sg['paragraphs']): out.append({'k': 'c' if j == 0 else 'n', 't': sg['t'], 'title': sg['title'], 'say': par})
+        if script['overview']: out.append({'k': 'h', 'say': script['overview']})
+        if script['watch']: out.append({'k': 'p', 'h': 'What to watch', 's': '', 'say': script['watch']})
+        if script['outro']: out.append({'k': 'p', 'h': 'That is all for now', 's': '', 'say': script['outro']})
+        return out
     isw = lambda n: 'was' if n == 1 else 'were'
     return [
         {'k': 'p', 'h': title, 's': date, 'say': f"Good evening. Here is your {'daily closing' if per == 'd' else 'weekly'} stock update for {date}."},
@@ -163,30 +171,74 @@ def gather(name, ticker, after, p=0.0):
     return tidy(items, after)[:14], counts
 
 SYSTEM = ("You are the researcher for a news presenter. A private investor owns shares in an ASX company whose price moved. Read the numbered news items (headlines and extracts) "
-          "and tell the investor what the news is saying about the company and why the price probably moved.\n"
-          "Rules:\n- Use ONLY facts in the items. No outside knowledge. Never invent figures, names, dates or quotes.\n"
-          "- Write the way a news presenter would speak: plain English, short sentences, 2 to 4 sentences, under 90 words.\n"
-          "- Say what happened first (for example a broker downgrade, results, guidance, a commodity price move, a deal, a legal issue), then how it links to the share price move.\n"
-          "- You MAY make a sensible inference about the likely driver when the items point one way, but use hedged words such as 'appears', 'likely', 'reports suggest' or 'analysts say'. "
-          "Never state a cause as certain unless the items say so.\n"
+          "and write a research note on what the news is saying about the company and why the price probably moved.\n"
+          "Rules:\n- Use ONLY facts in the items. No outside knowledge. Never invent figures, names, dates, ratings or quotes.\n"
+          "- Plain English. You MAY make a sensible inference about the likely driver when the items point one way, using hedged words such as 'appears', 'likely' or 'reports suggest'.\n"
           "- If the items do not explain the move, say plainly what the news is mostly about and that it does not clearly explain the move. Do not refuse.\n"
           "- Only use numbers that appear in the items or in the price move.\n"
-          "Reply with JSON: {\"summary\": string, \"driver\": one of \"broker\",\"results\",\"guidance\",\"commodity\",\"market\",\"deal\",\"legal\",\"other\",\"unclear\", "
+          "Reply with JSON: {\"summary\": 2 to 4 plain sentences under 90 words on what the news says and why the price probably moved, "
+          "\"developments\": up to 6 short factual sentences from the items (what happened, who, when), "
+          "\"analyst_views\": up to 4 short sentences naming the broker or analyst and their rating or view, only if stated in the items, "
+          "\"outlook\": one or two sentences on what investors are watching next, only if the items support it, "
+          "\"driver\": one of \"broker\",\"results\",\"guidance\",\"commodity\",\"market\",\"deal\",\"legal\",\"other\",\"unclear\", "
           "\"certainty\": \"high\" or \"medium\" or \"low\", \"support\": [numbers of the items you used], \"headline\": a title of at most 8 words, "
           "\"follow_up_queries\": up to 2 short web search queries that would help confirm the cause, or [] if you are already confident}")
 
-def ask_llm(user):
-    if NEWS_FAKE: return FAKE_LLM(user)
-    body = json.dumps({'model': MODEL, 'temperature': 0, 'response_format': {'type': 'json_object'},
-                       'messages': [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': user}]}).encode()
-    for attempt in range(3):
-        try:
+STYLE = ("Good evening. It's Tuesday, the 13th of October, and welcome to your weekly stock market wrap.\n"
+         "We begin with the positive performers, and CSL Limited has delivered a welcome result, climbing 4.4 per cent over the past week.\n"
+         "Investor confidence has also been tested by analyst downgrades. Barrenjoey lowered its rating in late September, while Jefferies downgraded the company from Buy to Hold this week.\n"
+         "The outlook, however, remains uncertain. Investors will be looking for clear evidence that the company can deliver on its production targets while keeping costs under control.")
+
+WRITER = ("You write the script for a professional television-style stock market bulletin, read aloud by a presenter to one private investor. "
+          "You are given research notes for the biggest movers on their watchlist. Write the bulletin in the voice of a calm, authoritative business news presenter. "
+          "Style example of the tone (do not copy its facts):\n" + STYLE + "\n"
+          "Rules:\n- Use ONLY the facts, names, ratings, dates and numbers in the research notes. Never invent anything. Keep every figure exactly as given.\n"
+          "- Australian spelling, and say 'per cent' not '%'. Spoken language only: no lists, no headings, no brackets.\n"
+          "- Order: gainers first, then fallers, biggest move first. Use natural transitions such as 'We begin with the positive performers', 'Turning now to the stocks under pressure', 'Also finishing in negative territory'.\n"
+          "- For each stock write the paragraphs the notes support: the price move, the background and recent developments, analyst views (only if given), and a measured outlook sentence. "
+          "If certainty is low or the cause is unclear, say so plainly rather than guessing. Report analyst ratings as the analysts' views, never as your own advice.\n"
+          "- Do not tell the investor to buy or sell. Do not say 'according to headlines'. Mention a publication only when it adds credibility.\n"
+          "- overview: one short paragraph comparing all the stocks you were given and also the 'others' moves briefly. watch: one paragraph on what to watch for each covered stock. outro: one or two sentences to close.\n"
+          "Reply with JSON: {\"intro\": string, \"segments\": [{\"t\": ticker, \"title\": at most 8 words, \"paragraphs\": [string, ...]}], \"overview\": string, \"watch\": string, \"outro\": string}")
+
+CHECKER = ("You are a strict fact-checker for a news script. Below are numbered script paragraphs and the source material they were written from. "
+           "List every sentence that states a fact (a number, a name, a date, an analyst rating or an event) that is NOT supported by the source material. "
+           "Reasonable hedged inferences such as 'appears' or 'likely' are fine. Reply with JSON: {\"unsupported\": [{\"paragraph\": number, \"sentence\": the exact sentence}]}. "
+           "If everything is supported, reply {\"unsupported\": []}.")
+
+FALLBACK_MODELS = ['openai/gpt-4.1-mini', 'openai/gpt-4o-mini', 'openai/gpt-4o']
+LLM_ERR = ''
+
+def chat(system, user, model, max_tokens=2200):
+    """One call to GitHub Models. Paces itself, respects rate limits, falls back to other models, and remembers the last error."""
+    global LLM_ERR
+    if NEWS_FAKE: return FAKE_CHAT(system, user)
+    import time
+    for m in [model] + [x for x in FALLBACK_MODELS if x != model]:
+        for attempt in range(3):
+            body = json.dumps({'model': m, 'temperature': 0.2, 'max_tokens': max_tokens, 'response_format': {'type': 'json_object'},
+                               'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}).encode()
             req = urllib.request.Request('https://models.github.ai/inference/chat/completions', data=body, headers={
                 'Authorization': 'Bearer ' + GH_TOKEN, 'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
-            with urllib.request.urlopen(req, timeout=90) as r: return json.loads(json.load(r)['choices'][0]['message']['content'])
-        except Exception as e:
-            print('model call failed', attempt + 1, repr(e)); import time; time.sleep(5 * (attempt + 1))
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r: text = json.load(r)['choices'][0]['message']['content']
+                time.sleep(4)                                               # stay under the free per-minute limit
+                text = re.sub(r'^```(?:json)?|```$', '', text.strip()).strip()
+                return json.loads(text[text.index('{'): text.rindex('}') + 1])
+            except urllib.error.HTTPError as e:
+                detail = ''
+                try: detail = e.read().decode('utf-8', 'replace')[:160].replace('\n', ' ')
+                except Exception: pass
+                LLM_ERR = f'{m}: HTTP {e.code} {detail}'.strip(); print('model call failed:', LLM_ERR)
+                if e.code == 429: time.sleep(min(int(e.headers.get('Retry-After') or 25 * (attempt + 1)), 90)); continue
+                if e.code in (400, 404, 422): break                         # this model or option is not accepted: try the next model
+                if e.code in (401, 403): return None                        # not allowed: no point trying others
+                time.sleep(5)
+            except Exception as e:
+                LLM_ERR = f'{m}: {e!r}'[:200]; print('model call failed:', LLM_ERR); time.sleep(5 * (attempt + 1))
     return None
+
+def ask_llm(user): return chat(SYSTEM, user, MODEL)
 
 nums = lambda s: set(re.findall(r'\d+(?:\.\d+)?', s))
 NEWS_CACHE = {}
@@ -200,7 +252,6 @@ def numbers_ok(text, evidence, move_pct):
     return True
 
 def keep_supported(summary, evidence, move_pct):
-    """Drop only the sentences that use figures not found in the evidence, and keep the rest."""
     kept = [s for s in re.split(r'(?<=[.!?])\s+', summary.strip()) if s and numbers_ok(s, evidence, move_pct)]
     return ' '.join(kept)
 
@@ -209,10 +260,11 @@ def prompt(s, move, date, heads, final):
     return f"Company: {s['n']} ({s['t']}). Its share price {move}. The move was on {date}.\nNews items:\n{lines}" + ("\nThis is the final pass, so set follow_up_queries to []." if final else '')
 
 def explain(s, p, per):
-    """Returns the researched report for one stock. confidence = how many trusted sources back it (multiple | single | unverified), or none."""
+    """Researches one stock. confidence = how many trusted sources back it (multiple | single | unverified), or none."""
     w = 'today' if per == 'd' else 'this week'
     move = f"{'rose' if p >= 0 else 'fell'} {abs(p):.1f} percent {w}"; date = s['rows'][-1][0]
-    item = {'t': s['t'], 'n': s['n'], 'move': move, 'reason': None, 'headline': None, 'confidence': 'none', 'certainty': '', 'driver': '', 'sources': [], 'why_none': '', 'found': 0, 'headlines': [], 'counts': {}}
+    item = {'t': s['t'], 'n': s['n'], 'move': move, 'pct': round(p, 1), 'reason': None, 'headline': None, 'confidence': 'none', 'certainty': '', 'driver': '', 'developments': [], 'analyst_views': [], 'outlook': '',
+            'sources': [], 'why_none': '', 'why_detail': '', 'found': 0, 'headlines': [], 'counts': {}, 'evidence': ''}
     after = (dt.date.fromisoformat(date) - dt.timedelta(days=1 if per == 'd' else 8)).isoformat()   # anchored to the day of the move
     name = short_name(s['n'])
     try: heads, counts = NEWS_CACHE.setdefault((s['t'], after, per), gather(name, s['t'], after, p))
@@ -222,7 +274,8 @@ def explain(s, p, per):
     item['found'] = len(heads); item['counts'] = dict(counts); item['headlines'] = [{k: h[k] for k in ('title', 'source', 'url', 'date')} for h in heads[:3]]
     if not heads: item['why_none'] = 'no_headlines'; return item
     ans = ask_llm(prompt(s, move, date, heads, False))
-    if not isinstance(ans, dict) or not str(ans.get('summary') or '').strip(): item['why_none'] = 'model_unavailable' if not isinstance(ans, dict) else 'model_no_reason'; return item
+    if not isinstance(ans, dict) or not str(ans.get('summary') or '').strip():
+        item['why_none'] = 'model_unavailable' if not isinstance(ans, dict) else 'model_no_reason'; item['why_detail'] = LLM_ERR if not isinstance(ans, dict) else ''; return item
     qs = [q.strip()[:120] for q in (ans.get('follow_up_queries') or []) if isinstance(q, str) and q.strip()][:2]
     if qs and ans.get('certainty') != 'high' and TAVILY_KEY and not NEWS_FAKE:      # a second round of research when the first was not conclusive
         more = []
@@ -235,9 +288,10 @@ def explain(s, p, per):
         if isinstance(ans2, dict) and str(ans2.get('summary') or '').strip(): ans = ans2
     sup = [i for i in (ans.get('support') or []) if isinstance(i, int) and 1 <= i <= len(heads)]
     chosen = [heads[i - 1] for i in dict.fromkeys(sup)] or heads[:3]
-    evidence = ' '.join(h['title'] + ' ' + h.get('content', '') for h in chosen)
+    evidence = ' '.join(h['title'] + ' ' + h.get('content', '') for h in heads)
+    def clean(x): return [str(v).strip() for v in (x or []) if isinstance(v, str) and v.strip() and numbers_ok(v, evidence, p)][:6]
     summary = str(ans['summary']).strip()
-    if not numbers_ok(summary, evidence, p):          # a figure that is not in the news items: ask for a rewrite without it, rather than cutting sentences out
+    if not numbers_ok(summary, evidence, p):          # a figure that is not in the news items: ask for a rewrite without it
         fix = ask_llm(prompt(s, move, date, heads, True) + f"\nYour earlier summary used figures that are not in the news items: {summary}\nRewrite the summary without those figures. Describe them in words instead of numbers.")
         fixed = str(fix.get('summary') or '').strip() if isinstance(fix, dict) else ''
         first = re.split(r'(?<=[.!?])\s+', summary)[0]
@@ -245,13 +299,16 @@ def explain(s, p, per):
     if not summary: item['why_none'] = 'numbers_dropped'; return item
     trusted = list(dict.fromkeys(h['domain'] for h in chosen if h.get('trusted')))
     item.update(reason=summary, headline=str(ans.get('headline') or s['n'])[:80], certainty=str(ans.get('certainty') or 'medium'), driver=str(ans.get('driver') or ''),
+                developments=clean(ans.get('developments')), analyst_views=clean(ans.get('analyst_views')), outlook=(clean([ans.get('outlook')]) or [''])[0],
                 confidence='multiple' if len(trusted) >= 2 else 'single' if len(trusted) == 1 else 'unverified',
-                sources=[{'title': h['title'], 'source': h['source'], 'url': h['url'], 'date': h['date']} for h in chosen[:4]])
+                sources=[{'title': h['title'], 'source': h['source'], 'url': h['url'], 'date': h['date']} for h in chosen[:4]],
+                evidence=' '.join(f"{h['source']}: {h['title']}. {h.get('content', '')[:350]}" for h in heads[:10]))
     return item
 
 def join_names(xs): return xs[0] if len(xs) == 1 else ', '.join(xs[:-1]) + ' and ' + xs[-1]
 
 def news_say(item, first):
+    """Simple fallback wording, used only if the script writer is unavailable."""
     pre = '' if first else f"{item['n']} {item['move']}. "
     if item['confidence'] == 'none':
         if item['headlines']: h = item['headlines'][0]; return pre + f"Headlines about {item['n']} include: {h['title']}, from {h['source']}."
@@ -267,17 +324,67 @@ def research(stocks, per):
     M = sorted([(s, chg(s['rows'], days)) for s in stocks if chg(s['rows'], days) is not None], key=lambda x: -abs(x[1]))[:int(os.environ.get('NEWS_TOP', '3'))]
     return [explain(s, p, per) for s, p in M]
 
+def ordinal(n): return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+def write_script(stocks, per, items):
+    """Stage 2 and 3: a professional presenter script from the research notes, then a fact-check pass. Returns a dict or None."""
+    got = [it for it in items if it['confidence'] != 'none']
+    if not got: return None
+    days = 1 if per == 'd' else 7
+    date = f"{now.strftime('%A')}, the {ordinal(now.day)} of {now.strftime('%B')}"
+    notes = [{'t': it['t'], 'company': it['n'], 'move': it['move'], 'percent_move': it['pct'], 'certainty': it['certainty'], 'summary': it['reason'], 'developments': it['developments'],
+              'analyst_views': it['analyst_views'], 'outlook': it['outlook']} for it in sorted(got, key=lambda x: -x['pct'])]
+    done = {it['t'] for it in got}
+    others = [{'company': s['n'], 'percent_move': round(chg(s['rows'], days), 1)} for s in stocks if s['t'] not in done and chg(s['rows'], days) is not None]
+    payload = json.dumps({'date': date, 'bulletin': 'daily closing wrap' if per == 'd' else 'weekly stock market wrap', 'period': 'today' if per == 'd' else 'over the past week',
+                          'target_words': 330 if per == 'd' else 520, 'stocks': notes, 'others': others})
+    facts = payload + ' ' + ' '.join(it['evidence'] for it in got)
+    sc = chat(WRITER, payload, WRITER_MODEL, 3200)
+    def paras(x): return [x.get('intro', '')] + [q for sg in x.get('segments', []) for q in sg.get('paragraphs', [])] + [x.get('overview', ''), x.get('watch', ''), x.get('outro', '')]
+    def bad(x): return sorted({n for q in paras(x) if isinstance(q, str) for n in nums(q) if not numbers_ok(n, facts, 0.0)})
+    if not isinstance(sc, dict) or not sc.get('segments'): print('script writer unavailable:', LLM_ERR); return None
+    b = bad(sc)
+    if b:
+        print('script used figures not in the notes, asking for a rewrite:', b)
+        sc2 = chat(WRITER, payload + f"\nYour earlier script used figures that are not in the notes: {', '.join(b)}. Rewrite the whole script without them.", WRITER_MODEL, 3200)
+        if isinstance(sc2, dict) and sc2.get('segments') and not bad(sc2): sc = sc2
+    flat = [(i, q) for i, q in enumerate(paras(sc)) if isinstance(q, str) and q.strip()]
+    chk = chat(CHECKER, 'Source material:\n' + facts[:12000] + '\n\nScript paragraphs:\n' + '\n'.join(f'{i}. {q}' for i, q in flat), MODEL, 1200)
+    drop = {}
+    if isinstance(chk, dict):
+        for u in chk.get('unsupported', []) or []:
+            if isinstance(u, dict) and isinstance(u.get('paragraph'), int) and isinstance(u.get('sentence'), str): drop.setdefault(u['paragraph'], []).append(u['sentence'].strip())
+        if drop: print('fact-check removed sentences:', drop)
+    def fix(i, q):
+        for sent in drop.get(i, []): q = q.replace(sent, '')
+        return re.sub(r'\s+', ' ', q).strip()
+    k = [0]
+    def nxt(q):
+        i = k[0]; k[0] += 1; return fix(i, q) if isinstance(q, str) else ''
+    out = {'intro': nxt(sc.get('intro', '')), 'segments': []}
+    for sg in sc.get('segments', []):
+        ps = [t for t in (nxt(q) for q in sg.get('paragraphs', [])) if t]
+        if ps: out['segments'].append({'t': sg.get('t'), 'title': str(sg.get('title') or '')[:80], 'paragraphs': ps})
+    out['overview'], out['watch'], out['outro'] = nxt(sc.get('overview', '')), nxt(sc.get('watch', '')), nxt(sc.get('outro', ''))
+    return out if out['intro'] and out['segments'] else None
+
 # test fixtures, used only when NEWS_FAKE=1
 FAKE_HEADS = {
-    'BHP': [{'title': 'BHP shares slide as China curbs iron ore imports', 'source': 'Reuters', 'domain': 'reuters.com', 'url': 'https://www.reuters.com/x', 'date': '2026-10-09'},
+    'BHP': [{'title': 'BHP shares slide as China curbs iron ore imports', 'source': 'Reuters', 'domain': 'reuters.com', 'url': 'https://www.reuters.com/x', 'date': '2026-10-09', 'content': 'Jefferies cut BHP to Hold.'},
             {'title': 'Iron ore falls after China steps up port checks', 'source': 'AFR', 'domain': 'afr.com', 'url': 'https://www.afr.com/y', 'date': '2026-10-09'}],
     'CBA': [{'title': 'Commonwealth Bank lifts home loan rates', 'source': 'ABC News', 'domain': 'abc.net.au', 'url': 'https://www.abc.net.au/z', 'date': '2026-10-09'}],
     'CSL': [{'title': 'CSL cuts outlook', 'source': 'AFR', 'domain': 'afr.com', 'url': 'https://www.afr.com/w', 'date': '2026-10-09'}],
     'TLS': [{'title': 'Telstra to raise mobile prices from December', 'source': 'Some Blog', 'domain': 'someblog.example', 'url': 'https://someblog.example/t', 'date': '2026-10-09'}],
     'WOW': [{'title': 'Woolworths opens new store in Perth', 'source': 'Perth Now', 'domain': 'perthnow.com.au', 'url': 'https://www.perthnow.com.au/w', 'date': '2026-10-09'}]}
-def FAKE_LLM(user):
-    if 'BHP' in user: return {'summary': 'BHP shares fell as China moved to restrict iron ore imports, which also pushed the iron ore price down.', 'driver': 'commodity', 'certainty': 'high', 'support': [1, 2], 'headline': 'China curbs hit BHP', 'follow_up_queries': []}
-    if 'CBA' in user: return {'summary': 'Commonwealth Bank raised its home loan rates. That appears to be the main news around the bank.', 'driver': 'other', 'certainty': 'medium', 'support': [1], 'headline': 'CBA lifts loan rates', 'follow_up_queries': []}
+def FAKE_CHAT(system, user):
+    if 'strict fact-checker' in system:
+        return {'unsupported': [{'paragraph': int(l.split('.')[0]), 'sentence': 'The chief executive also resigned, which is FABRICATED.'} for l in user.split('\n') if 'FABRICATED' in l]}
+    if 'stock market bulletin' in system:
+        ts = [x['t'] for x in json.loads(user.split('\n')[0])['stocks']]
+        return {'intro': 'Good evening. Welcome to your stock market wrap.', 'segments': [{'t': t, 'title': t + ' in focus', 'paragraphs': [f'{t} was a major mover this period.', 'The background is set out in the news. The chief executive also resigned, which is FABRICATED.', 'The outlook remains uncertain.']} for t in ts],
+                'overview': 'That is how the covered stocks compare.', 'watch': 'We will be watching each of them closely.', 'outro': 'That is where things stand.'}
+    if 'BHP' in user: return {'summary': 'BHP shares fell as China moved to restrict iron ore imports, which also pushed the iron ore price down.', 'developments': ['China stepped up port checks on iron ore.'], 'analyst_views': ['Jefferies cut BHP to Hold.'], 'outlook': 'Investors are watching Chinese demand.', 'driver': 'commodity', 'certainty': 'high', 'support': [1, 2], 'headline': 'China curbs hit BHP', 'follow_up_queries': []}
+    if 'CBA' in user: return {'summary': 'Commonwealth Bank raised its home loan rates. That appears to be the main news around the bank.', 'developments': [], 'analyst_views': [], 'outlook': '', 'driver': 'other', 'certainty': 'medium', 'support': [1], 'headline': 'CBA lifts loan rates', 'follow_up_queries': []}
     if 'CSL' in user and 'Rewrite the summary without' in user: return {'summary': 'CSL cut its outlook, which analysts are likely to focus on.', 'driver': 'guidance', 'certainty': 'medium', 'support': [1], 'headline': 'CSL cuts outlook', 'follow_up_queries': []}
     if 'CSL' in user: return {'summary': 'CSL cut its outlook by 40 percent. Analysts are likely to focus on that.', 'driver': 'guidance', 'certainty': 'medium', 'support': [1], 'headline': 'CSL cuts outlook', 'follow_up_queries': []}
     if 'TLS' in user: return {'summary': 'Telstra shares moved after reports it will raise mobile prices.', 'driver': 'other', 'certainty': 'low', 'support': [1], 'headline': 'Telstra price rise', 'follow_up_queries': []}
@@ -336,7 +443,8 @@ def main():
     for per, name in (('d', 'daily'), ('w', 'weekly')):
         news = research(stocks, per) if os.environ.get('NEWS', 'on') != 'off' else []
         news_out[name] = news
-        sc = scenes(stocks, per, news)
+        script = write_script(stocks, per, news) if news and os.environ.get('NEWS', 'on') != 'off' else None
+        sc = scenes(stocks, per, news, script)
         for i, x in enumerate(sc, 1):
             x['audio'] = None
             if say:
@@ -344,7 +452,7 @@ def main():
                 except Exception as e: print('Audio failed for', name, i, repr(e))
         bul[name] = {'scenes': sc}
     json.dump(bul, open(os.path.join(SITE, 'data', 'bulletin.json'), 'w'))
-    json.dump({'updated': stamp, **news_out}, open(os.path.join(SITE, 'data', 'news.json'), 'w'))
+    json.dump({'updated': stamp, 'llm_error': LLM_ERR, **news_out}, open(os.path.join(SITE, 'data', 'news.json'), 'w'))
     print('Built site with', len(stocks), 'stocks.', ('Some failed: ' + '; '.join(fails)) if fails else '')
 
 main()
