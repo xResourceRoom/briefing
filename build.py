@@ -98,7 +98,7 @@ def google(name, ticker, after):
         src = it.find('source'); sname = (src.text or '').strip() if src is not None else ''; dom = host(src.get('url', '')) if src is not None else ''
         title = (it.findtext('title') or '').strip()
         if sname and title.endswith(' - ' + sname): title = title[:-len(sname) - 3].strip()
-        out.append({'title': title, 'source': sname or dom, 'domain': dom, 'url': it.findtext('link') or '', 'date': parse_date(it.findtext('pubDate'))})
+        out.append({'title': clean_title(title, sname), 'source': sname or dom, 'domain': dom, 'url': it.findtext('link') or '', 'date': parse_date(it.findtext('pubDate'))})
     return out
 
 def bing(name, ticker, after):
@@ -107,7 +107,7 @@ def bing(name, ticker, after):
     for it in rss('https://www.bing.com/news/search?' + q).iter('item'):
         link = it.findtext('link') or ''; real = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('url', [link])[0]
         sname = next(((e.text or '').strip() for e in it if e.tag.split('}')[-1] == 'Source'), '')
-        out.append({'title': (it.findtext('title') or '').strip(), 'source': sname or host(real), 'domain': host(real), 'url': real, 'date': parse_date(it.findtext('pubDate'))})
+        out.append({'title': clean_title((it.findtext('title') or '').strip(), sname), 'source': sname or host(real), 'domain': host(real), 'url': real, 'date': parse_date(it.findtext('pubDate'))})
     return out
 
 NAMES = {'afr.com': 'AFR', 'thebull.com.au': 'The Bull', 'kalkinemedia.com': 'Kalkine', 'au.kalkinemedia.com': 'Kalkine', 'fool.com.au': 'Motley Fool Australia',
@@ -116,47 +116,64 @@ NAMES = {'afr.com': 'AFR', 'thebull.com.au': 'The Bull', 'kalkinemedia.com': 'Ka
          'livewire.com.au': 'Livewire', 'investsmart.com.au': 'InvestSmart', 'sharecafe.com.au': 'Sharecafe', 'proactiveinvestors.com.au': 'Proactive Investors',
          'themarketherald.com.au': 'The Market Herald', 'mining.com.au': 'Mining.com.au', 'news.com.au': 'news.com.au', 'thewest.com.au': 'The West Australian'}
 
-def tavily(name, ticker, p, after):
-    """News search built for AI: returns titles AND article text. Needs a free TAVILY_KEY."""
-    days = max(2, (dt.date.today() - dt.date.fromisoformat(after)).days + 1)
-    body = json.dumps({'api_key': TAVILY_KEY, 'query': f"Why did {name} (ASX:{ticker}) shares {'rise' if p >= 0 else 'fall'}? broker, announcement or news",
-                       'topic': 'news', 'days': days, 'max_results': 10, 'search_depth': 'basic'}).encode()
+def clean_title(t, source=''):
+    """Drop a trailing ' - The Bull' style publisher name from a headline."""
+    t = re.sub(r'\s+', ' ', t or '').strip(); known = {v.lower() for v in NAMES.values()} | ({source.lower()} if source else set())
+    for sep in (' - ', ' | ', ' – ', ' — '):
+        head, _, tail = t.rpartition(sep)
+        if head and tail.strip().lower() in known: t = head.strip()
+    return t
+
+def tavily_search(query, days, depth='advanced', n=8):
+    """News search built for AI: returns titles AND article text. Advanced = 2 credits, basic = 1."""
+    body = json.dumps({'api_key': TAVILY_KEY, 'query': query, 'topic': 'news', 'days': days, 'max_results': n, 'search_depth': depth}).encode()
     req = urllib.request.Request('https://api.tavily.com/search', data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TAVILY_KEY})
-    with urllib.request.urlopen(req, timeout=60) as r: data = json.load(r)
+    with urllib.request.urlopen(req, timeout=90) as r: data = json.load(r)
     out = []
     for x in data.get('results', []):
-        dom = host(x.get('url', '')); d = (x.get('published_date') or '')
+        dom = host(x.get('url', '')); d = (x.get('published_date') or ''); src = NAMES.get(dom, dom)
         try: date = email.utils.parsedate_to_datetime(d).astimezone(SYD).date().isoformat()
         except Exception: date = d[:10] if re.match(r'\d{4}-\d{2}-\d{2}', d) else ''
-        out.append({'title': (x.get('title') or '').strip(), 'source': NAMES.get(dom, dom), 'domain': dom, 'url': x.get('url', ''), 'date': date, 'content': re.sub(r'\s+', ' ', x.get('content') or '')[:600]})
+        out.append({'title': clean_title(x.get('title') or '', src), 'source': src, 'domain': dom, 'url': x.get('url', ''), 'date': date, 'content': re.sub(r'\s+', ' ', x.get('content') or '')[:1200]})
     return out
 
-def gather(name, ticker, after, p=0.0):
-    """Evidence for a move: article text from Tavily (if you added a key), plus Google News and Bing News headlines."""
-    if NEWS_FAKE:
-        fk = [dict(h, trusted=h['domain'] in TRUSTED) for h in FAKE_HEADS.get(ticker, [])]; return fk, {'fake': len(fk)}
-    items, counts = [], {}
-    feeds = ([('tavily', lambda: tavily(name, ticker, p, after))] if TAVILY_KEY else []) + [('google', lambda: google(name, ticker, after)), ('bing', lambda: bing(name, ticker, after))]
-    for label, fn in feeds:
-        try: got = fn()
-        except Exception as e: print(f'{ticker}: {label} failed', repr(e)); got = []
-        counts[label] = len(got); items += got
-    if not TAVILY_KEY: counts['tavily'] = 'no key'
+def days_since(after): return max(2, (dt.date.today() - dt.date.fromisoformat(after)).days + 1)
+
+def tidy(items, after):
     seen, out = set(), []
     for h in items:
         key = re.sub(r'\W+', ' ', h['title'].lower())[:80]
         if not h['title'] or key in seen or (h['date'] and h['date'] < after): continue
         seen.add(key); h['trusted'] = h['domain'] in TRUSTED; out.append(h)
     out.sort(key=lambda h: h['date'] or '', reverse=True); out.sort(key=lambda h: not h['trusted'])
-    return out[:15], counts
+    return out
 
-SYSTEM = ("You explain share price moves to a private investor in plain English. Use ONLY the numbered headlines and article extracts you are given. Do not use outside knowledge. "
-          "Reply with JSON: {\"reason\": string or null, \"support\": [headline numbers], \"headline\": string}. "
-          "Find the best-supported cause of the move. Prefer headlines dated on or just before the move. If several headlines point to the same development, explain that one. "
-          "reason: one or two short sentences (under 45 words), simple words, saying what happened and how it relates to the price move. "
-          "Use wording like 'after', 'as' or 'reports say'. Never claim the news definitely caused the move. Do not add numbers that are not in the text you are given. "
-          "Only set reason to null if no headline gives a plausible cause for a move in this direction. support lists the headline numbers that back your reason. "
-          "headline: a title of at most 8 words.")
+def gather(name, ticker, after, p=0.0):
+    """First round of evidence: article text from Tavily (if you added a key), plus Google News and Bing News headlines."""
+    if NEWS_FAKE:
+        fk = [dict(h, trusted=h['domain'] in TRUSTED) for h in FAKE_HEADS.get(ticker, [])]; return fk, {'fake': len(fk)}
+    items, counts = [], {}
+    feeds = ([('tavily', lambda: tavily_search(f"Why did {name} (ASX:{ticker}) shares {'rise' if p >= 0 else 'fall'}? broker, announcement or news", days_since(after)))] if TAVILY_KEY else []) \
+        + [('google', lambda: google(name, ticker, after)), ('bing', lambda: bing(name, ticker, after))]
+    for label, fn in feeds:
+        try: got = fn()
+        except Exception as e: print(f'{ticker}: {label} failed', repr(e)); got = []
+        counts[label] = len(got); items += got
+    if not TAVILY_KEY: counts['tavily'] = 'no key'
+    return tidy(items, after)[:14], counts
+
+SYSTEM = ("You are the researcher for a news presenter. A private investor owns shares in an ASX company whose price moved. Read the numbered news items (headlines and extracts) "
+          "and tell the investor what the news is saying about the company and why the price probably moved.\n"
+          "Rules:\n- Use ONLY facts in the items. No outside knowledge. Never invent figures, names, dates or quotes.\n"
+          "- Write the way a news presenter would speak: plain English, short sentences, 2 to 4 sentences, under 90 words.\n"
+          "- Say what happened first (for example a broker downgrade, results, guidance, a commodity price move, a deal, a legal issue), then how it links to the share price move.\n"
+          "- You MAY make a sensible inference about the likely driver when the items point one way, but use hedged words such as 'appears', 'likely', 'reports suggest' or 'analysts say'. "
+          "Never state a cause as certain unless the items say so.\n"
+          "- If the items do not explain the move, say plainly what the news is mostly about and that it does not clearly explain the move. Do not refuse.\n"
+          "- Only use numbers that appear in the items or in the price move.\n"
+          "Reply with JSON: {\"summary\": string, \"driver\": one of \"broker\",\"results\",\"guidance\",\"commodity\",\"market\",\"deal\",\"legal\",\"other\",\"unclear\", "
+          "\"certainty\": \"high\" or \"medium\" or \"low\", \"support\": [numbers of the items you used], \"headline\": a title of at most 8 words, "
+          "\"follow_up_queries\": up to 2 short web search queries that would help confirm the cause, or [] if you are already confident}")
 
 def ask_llm(user):
     if NEWS_FAKE: return FAKE_LLM(user)
@@ -174,42 +191,62 @@ def ask_llm(user):
 nums = lambda s: set(re.findall(r'\d+(?:\.\d+)?', s))
 NEWS_CACHE = {}
 
-def numbers_ok(reason, support_text, move_pct):
-    allowed = nums(support_text)
-    for n in nums(reason):
+def numbers_ok(text, evidence, move_pct):
+    allowed = nums(evidence)
+    for n in nums(text):
         v = float(n)
         if n in allowed or abs(v - abs(move_pct)) <= 0.6 or v == round(abs(move_pct)): continue
         return False
     return True
 
+def keep_supported(summary, evidence, move_pct):
+    """Drop only the sentences that use figures not found in the evidence, and keep the rest."""
+    kept = [s for s in re.split(r'(?<=[.!?])\s+', summary.strip()) if s and numbers_ok(s, evidence, move_pct)]
+    return ' '.join(kept)
+
+def prompt(s, move, date, heads, final):
+    lines = '\n'.join(f"{i}. [{h['source']}, {h['date']}] {h['title']}" + (f" - {h['content']}" if h.get('content') else '') for i, h in enumerate(heads, 1))[:14000]
+    return f"Company: {s['n']} ({s['t']}). Its share price {move}. The move was on {date}.\nNews items:\n{lines}" + ("\nThis is the final pass, so set follow_up_queries to []." if final else '')
+
 def explain(s, p, per):
-    """Returns {t,n,move,reason,headline,confidence,sources,why_none,found,headlines}. confidence: multiple | single | unverified | none."""
+    """Returns the researched report for one stock. confidence = how many trusted sources back it (multiple | single | unverified), or none."""
     w = 'today' if per == 'd' else 'this week'
-    move = f"{'rose' if p >= 0 else 'fell'} {abs(p):.1f} percent {w}"
-    item = {'t': s['t'], 'n': s['n'], 'move': move, 'reason': None, 'headline': None, 'confidence': 'none', 'sources': [], 'why_none': '', 'found': 0, 'headlines': []}
-    after = (dt.date.fromisoformat(s['rows'][-1][0]) - dt.timedelta(days=1 if per == 'd' else 8)).isoformat()   # anchored to the day of the move
+    move = f"{'rose' if p >= 0 else 'fell'} {abs(p):.1f} percent {w}"; date = s['rows'][-1][0]
+    item = {'t': s['t'], 'n': s['n'], 'move': move, 'reason': None, 'headline': None, 'confidence': 'none', 'certainty': '', 'driver': '', 'sources': [], 'why_none': '', 'found': 0, 'headlines': [], 'counts': {}}
+    after = (dt.date.fromisoformat(date) - dt.timedelta(days=1 if per == 'd' else 8)).isoformat()   # anchored to the day of the move
     name = short_name(s['n'])
-    try:
-        heads, counts = NEWS_CACHE.setdefault((s['t'], after, per), gather(name, s['t'], after, p))
+    try: heads, counts = NEWS_CACHE.setdefault((s['t'], after, per), gather(name, s['t'], after, p))
     except Exception as e:
         print('news fetch failed for', s['t'], repr(e)); item['why_none'] = 'fetch_failed'; return item
-    print(f"{s['t']}: searched '{name}' since {after}: {counts}, kept {len(heads)} headlines ({sum(1 for h in heads if h.get('trusted'))} from trusted sites)")
-    item['found'] = len(heads); item['counts'] = counts; item['headlines'] = [{k: h[k] for k in ('title', 'source', 'url', 'date')} for h in heads[:3]]
+    print(f"{s['t']}: searched '{name}' since {after}: {counts}, kept {len(heads)} items ({sum(1 for h in heads if h.get('trusted'))} from trusted sites)")
+    item['found'] = len(heads); item['counts'] = dict(counts); item['headlines'] = [{k: h[k] for k in ('title', 'source', 'url', 'date')} for h in heads[:3]]
     if not heads: item['why_none'] = 'no_headlines'; return item
-    lines = '\n'.join(f"{i}. [{h['source']}, {h['date']}] {h['title']}" + (f" - {h['content']}" if h.get('content') else '') for i, h in enumerate(heads, 1))
-    ans = ask_llm(f"Company: {s['n']} ({s['t']}). Its share price {move}. The move was on {s['rows'][-1][0]}.\nHeadlines:\n{lines}")
-    if not isinstance(ans, dict): item['why_none'] = 'model_unavailable'; return item
-    if not ans.get('reason'): item['why_none'] = 'model_no_reason'; return item
-    sup = [i for i in ans.get('support', []) if isinstance(i, int) and 1 <= i <= len(heads)]
-    if not sup: item['why_none'] = 'no_support'; return item
-    chosen = [heads[i - 1] for i in dict.fromkeys(sup)]
-    reason = str(ans['reason']).strip()
-    if not numbers_ok(reason, ' '.join(h['title'] + ' ' + h.get('content', '') for h in chosen), p):
-        print('dropped an explanation with numbers not found in the headlines for', s['t']); item['why_none'] = 'numbers_dropped'; return item
+    ans = ask_llm(prompt(s, move, date, heads, False))
+    if not isinstance(ans, dict) or not str(ans.get('summary') or '').strip(): item['why_none'] = 'model_unavailable' if not isinstance(ans, dict) else 'model_no_reason'; return item
+    qs = [q.strip()[:120] for q in (ans.get('follow_up_queries') or []) if isinstance(q, str) and q.strip()][:2]
+    if qs and ans.get('certainty') != 'high' and TAVILY_KEY and not NEWS_FAKE:      # a second round of research when the first was not conclusive
+        more = []
+        for q in qs:
+            try: more += tavily_search(q if name.lower() in q.lower() else f"{name} {q}", days_since(after), 'basic', 5)
+            except Exception as e: print(f"{s['t']}: follow-up search failed", repr(e))
+        item['counts']['follow_ups'] = len(qs)
+        heads = tidy(heads + more, after)[:14]; item['found'] = len(heads)
+        ans2 = ask_llm(prompt(s, move, date, heads, True))
+        if isinstance(ans2, dict) and str(ans2.get('summary') or '').strip(): ans = ans2
+    sup = [i for i in (ans.get('support') or []) if isinstance(i, int) and 1 <= i <= len(heads)]
+    chosen = [heads[i - 1] for i in dict.fromkeys(sup)] or heads[:3]
+    evidence = ' '.join(h['title'] + ' ' + h.get('content', '') for h in chosen)
+    summary = str(ans['summary']).strip()
+    if not numbers_ok(summary, evidence, p):          # a figure that is not in the news items: ask for a rewrite without it, rather than cutting sentences out
+        fix = ask_llm(prompt(s, move, date, heads, True) + f"\nYour earlier summary used figures that are not in the news items: {summary}\nRewrite the summary without those figures. Describe them in words instead of numbers.")
+        fixed = str(fix.get('summary') or '').strip() if isinstance(fix, dict) else ''
+        first = re.split(r'(?<=[.!?])\s+', summary)[0]
+        summary = fixed if fixed and numbers_ok(fixed, evidence, p) else (keep_supported(summary, evidence, p) if numbers_ok(first, evidence, p) else '')
+    if not summary: item['why_none'] = 'numbers_dropped'; return item
     trusted = list(dict.fromkeys(h['domain'] for h in chosen if h.get('trusted')))
-    item.update(reason=reason if reason.endswith('.') else reason + '.', headline=str(ans.get('headline') or s['n'])[:80],
+    item.update(reason=summary, headline=str(ans.get('headline') or s['n'])[:80], certainty=str(ans.get('certainty') or 'medium'), driver=str(ans.get('driver') or ''),
                 confidence='multiple' if len(trusted) >= 2 else 'single' if len(trusted) == 1 else 'unverified',
-                sources=[{'title': h['title'], 'source': h['source'], 'url': h['url'], 'date': h['date']} for h in chosen])
+                sources=[{'title': h['title'], 'source': h['source'], 'url': h['url'], 'date': h['date']} for h in chosen[:4]])
     return item
 
 def join_names(xs): return xs[0] if len(xs) == 1 else ', '.join(xs[:-1]) + ' and ' + xs[-1]
@@ -217,12 +254,12 @@ def join_names(xs): return xs[0] if len(xs) == 1 else ', '.join(xs[:-1]) + ' and
 def news_say(item, first):
     pre = '' if first else f"{item['n']} {item['move']}. "
     if item['confidence'] == 'none':
-        if item['headlines']: h = item['headlines'][0]; return pre + f"I could not find a clear reason for {item['n']}'s move. The latest headline I found was: {h['title']}, from {h['source']}."
+        if item['headlines']: h = item['headlines'][0]; return pre + f"Headlines about {item['n']} include: {h['title']}, from {h['source']}."
         return pre + f"I found no recent news about {item['n']}, so I cannot say why it moved."
     names = list(dict.fromkeys(x['source'] for x in item['sources']))[:2]
     tail = {'multiple': f" Several sources report this, including {join_names(names)}.",
-            'single': f" Only one source, {names[0]}, reports this, so treat it with care.",
-            'unverified': f" This is only reported by lesser-known sources such as {names[0]}, so it is unconfirmed."}[item['confidence']]
+            'single': f" This comes from one source, {names[0]}, so treat it with care.",
+            'unverified': f" This comes only from lesser-known sources such as {names[0]}, so it is unconfirmed."}[item['confidence']]
     return pre + item['reason'] + tail
 
 def research(stocks, per):
@@ -235,17 +272,17 @@ FAKE_HEADS = {
     'BHP': [{'title': 'BHP shares slide as China curbs iron ore imports', 'source': 'Reuters', 'domain': 'reuters.com', 'url': 'https://www.reuters.com/x', 'date': '2026-10-09'},
             {'title': 'Iron ore falls after China steps up port checks', 'source': 'AFR', 'domain': 'afr.com', 'url': 'https://www.afr.com/y', 'date': '2026-10-09'}],
     'CBA': [{'title': 'Commonwealth Bank lifts home loan rates', 'source': 'ABC News', 'domain': 'abc.net.au', 'url': 'https://www.abc.net.au/z', 'date': '2026-10-09'}],
-    'CSL': [{'title': 'CSL cuts outlook by 12 percent', 'source': 'AFR', 'domain': 'afr.com', 'url': 'https://www.afr.com/w', 'date': '2026-10-09'}],
-}
-FAKE_HEADS['TLS'] = [{'title': 'Telstra to raise mobile prices from December', 'source': 'Some Blog', 'domain': 'someblog.example', 'url': 'https://someblog.example/t', 'date': '2026-10-09'}]
-FAKE_HEADS['WOW'] = [{'title': 'Woolworths opens new store in Perth', 'source': 'Perth Now', 'domain': 'perthnow.com.au', 'url': 'https://www.perthnow.com.au/w', 'date': '2026-10-09'}]
+    'CSL': [{'title': 'CSL cuts outlook', 'source': 'AFR', 'domain': 'afr.com', 'url': 'https://www.afr.com/w', 'date': '2026-10-09'}],
+    'TLS': [{'title': 'Telstra to raise mobile prices from December', 'source': 'Some Blog', 'domain': 'someblog.example', 'url': 'https://someblog.example/t', 'date': '2026-10-09'}],
+    'WOW': [{'title': 'Woolworths opens new store in Perth', 'source': 'Perth Now', 'domain': 'perthnow.com.au', 'url': 'https://www.perthnow.com.au/w', 'date': '2026-10-09'}]}
 def FAKE_LLM(user):
-    if 'TLS' in user: return {'reason': 'Telstra shares moved after reports it will raise mobile prices.', 'support': [1], 'headline': 'Telstra price rise'}
-    if 'WOW' in user: return {'reason': None, 'support': [], 'headline': ''}
-    if 'BHP' in user: return {'reason': 'BHP shares fell as China moved to restrict iron ore imports, which also pushed the iron ore price down.', 'support': [1, 2], 'headline': 'China curbs hit BHP'}
-    if 'CBA' in user: return {'reason': 'Commonwealth Bank raised its home loan rates.', 'support': [1], 'headline': 'CBA lifts loan rates'}
-    if 'CSL' in user: return {'reason': 'CSL cut its outlook by 40 percent.', 'support': [1], 'headline': 'CSL cuts outlook'}   # 40 is not in the headline: must be dropped
-    return {'reason': None, 'support': [], 'headline': ''}
+    if 'BHP' in user: return {'summary': 'BHP shares fell as China moved to restrict iron ore imports, which also pushed the iron ore price down.', 'driver': 'commodity', 'certainty': 'high', 'support': [1, 2], 'headline': 'China curbs hit BHP', 'follow_up_queries': []}
+    if 'CBA' in user: return {'summary': 'Commonwealth Bank raised its home loan rates. That appears to be the main news around the bank.', 'driver': 'other', 'certainty': 'medium', 'support': [1], 'headline': 'CBA lifts loan rates', 'follow_up_queries': []}
+    if 'CSL' in user and 'Rewrite the summary without' in user: return {'summary': 'CSL cut its outlook, which analysts are likely to focus on.', 'driver': 'guidance', 'certainty': 'medium', 'support': [1], 'headline': 'CSL cuts outlook', 'follow_up_queries': []}
+    if 'CSL' in user: return {'summary': 'CSL cut its outlook by 40 percent. Analysts are likely to focus on that.', 'driver': 'guidance', 'certainty': 'medium', 'support': [1], 'headline': 'CSL cuts outlook', 'follow_up_queries': []}
+    if 'TLS' in user: return {'summary': 'Telstra shares moved after reports it will raise mobile prices.', 'driver': 'other', 'certainty': 'low', 'support': [1], 'headline': 'Telstra price rise', 'follow_up_queries': []}
+    if 'WOW' in user: return {'summary': 'Woolworths is mostly in the news for opening a new Perth store. None of it clearly explains the price move.', 'driver': 'unclear', 'certainty': 'low', 'support': [1], 'headline': 'Woolworths Perth store', 'follow_up_queries': []}
+    return None
 
 def make_tts():
     if TTS == 'off': return None
