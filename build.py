@@ -6,7 +6,7 @@ SYD = ZoneInfo('Australia/Sydney'); ROOT = os.path.dirname(os.path.abspath(__fil
 try: SECRETS = json.loads(os.environ.get('SECRETS_JSON') or '{}')
 except Exception: SECRETS = {}
 KEY = os.environ.get('EODHD_KEY') or SECRETS.get('EODHD_KEY', ''); FAKE = os.environ.get('EODHD_FAKE') == '1'; TTS = os.environ.get('TTS', 'on'); VOICE = os.environ.get('VOICE', 'bm_george')
-NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1-mini'); WRITER_MODEL = os.environ.get('WRITER_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', '')
+NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1-mini'); WRITER_MODEL = os.environ.get('WRITER_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', ''); GEMINI_KEY = os.environ.get('GEMINI_KEY') or SECRETS.get('GEMINI_KEY', '')
 
 def watchlist():
     out = []
@@ -134,7 +134,7 @@ def clean_title(t, source=''):
 
 def tavily_search(query, days, depth='advanced', n=8):
     """News search built for AI: returns titles AND article text. Advanced = 2 credits, basic = 1."""
-    body = json.dumps({'api_key': TAVILY_KEY, 'query': query, 'topic': 'news', 'days': days, 'max_results': n, 'search_depth': depth}).encode()
+    body = json.dumps({'api_key': TAVILY_KEY, 'query': query, 'topic': 'news', 'days': days, 'max_results': n, 'search_depth': depth, 'include_answer': 'advanced' if depth == 'advanced' else False}).encode()
     req = urllib.request.Request('https://api.tavily.com/search', data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TAVILY_KEY})
     with urllib.request.urlopen(req, timeout=90) as r: data = json.load(r)
     out = []
@@ -143,7 +143,9 @@ def tavily_search(query, days, depth='advanced', n=8):
         try: date = email.utils.parsedate_to_datetime(d).astimezone(SYD).date().isoformat()
         except Exception: date = d[:10] if re.match(r'\d{4}-\d{2}-\d{2}', d) else ''
         out.append({'title': clean_title(x.get('title') or '', src), 'source': src, 'domain': dom, 'url': x.get('url', ''), 'date': date, 'content': re.sub(r'\s+', ' ', x.get('content') or '')[:1200]})
-    return out
+    return out, (data.get('answer') or '').strip()
+
+ANS = {}
 
 def days_since(after): return max(2, (dt.date.today() - dt.date.fromisoformat(after)).days + 1)
 
@@ -164,7 +166,9 @@ def gather(name, ticker, after, p=0.0):
     feeds = ([('tavily', lambda: tavily_search(f"Why did {name} (ASX:{ticker}) shares {'rise' if p >= 0 else 'fall'}? broker, announcement or news", days_since(after)))] if TAVILY_KEY else []) \
         + [('google', lambda: google(name, ticker, after)), ('bing', lambda: bing(name, ticker, after))]
     for label, fn in feeds:
-        try: got = fn()
+        try:
+            got = fn()
+            if label == 'tavily': got, ANS[(ticker, after)] = got
         except Exception as e: print(f'{ticker}: {label} failed', repr(e)); got = []
         counts[label] = len(got); items += got
     if not TAVILY_KEY: counts['tavily'] = 'no key'
@@ -209,11 +213,41 @@ CHECKER = ("You are a strict fact-checker for a news script. Below are numbered 
 FALLBACK_MODELS = ['openai/gpt-4.1-mini', 'openai/gpt-4o-mini', 'openai/gpt-4o']
 LLM_ERR = ''
 
+def gemini(system, user, max_tokens, strong=False):
+    """Google Gemini (free key from aistudio.google.com). Used first when a GEMINI_KEY secret exists."""
+    global LLM_ERR
+    import time
+    for m in (['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'] if strong else ['gemini-2.5-flash', 'gemini-2.0-flash']):
+        for attempt in range(3):
+            body = json.dumps({'systemInstruction': {'parts': [{'text': system}]}, 'contents': [{'role': 'user', 'parts': [{'text': user}]}],
+                               'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 8192, 'responseMimeType': 'application/json'}}).encode()
+            req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent', data=body, headers={'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY})
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r: data = json.load(r)
+                text = data['candidates'][0]['content']['parts'][0]['text']; time.sleep(2)
+                text = re.sub(r'^```(?:json)?|```$', '', text.strip()).strip()
+                return json.loads(text[text.index('{'): text.rindex('}') + 1])
+            except urllib.error.HTTPError as e:
+                detail = ''
+                try: detail = e.read().decode('utf-8', 'replace')[:160].replace('\n', ' ')
+                except Exception: pass
+                LLM_ERR = f'gemini {m}: HTTP {e.code} {detail}'.strip(); print('model call failed:', LLM_ERR)
+                if e.code == 429: time.sleep(min(int(e.headers.get('Retry-After') or 20 * (attempt + 1)), 60)); continue
+                if e.code in (400, 404): break
+                if e.code in (401, 403): return None
+                time.sleep(5)
+            except Exception as e:
+                LLM_ERR = f'gemini {m}: {e!r}'[:200]; print('model call failed:', LLM_ERR); time.sleep(5 * (attempt + 1))
+    return None
+
 def chat(system, user, model, max_tokens=2200):
     """One call to GitHub Models. Paces itself, respects rate limits, falls back to other models, and remembers the last error."""
     global LLM_ERR
     if NEWS_FAKE: return FAKE_CHAT(system, user)
     import time
+    if GEMINI_KEY:
+        got = gemini(system, user, max_tokens, strong=(model == WRITER_MODEL))
+        if got is not None: return got
     for m in [model] + [x for x in FALLBACK_MODELS if x != model]:
         for attempt in range(3):
             body = json.dumps({'model': m, 'temperature': 0.2, 'max_tokens': max_tokens, 'response_format': {'type': 'json_object'},
@@ -259,14 +293,31 @@ def prompt(s, move, date, heads, final):
     lines = '\n'.join(f"{i}. [{h['source']}, {h['date']}] {h['title']}" + (f" - {h['content']}" if h.get('content') else '') for i, h in enumerate(heads, 1))[:14000]
     return f"Company: {s['n']} ({s['t']}). Its share price {move}. The move was on {date}.\nNews items:\n{lines}" + ("\nThis is the final pass, so set follow_up_queries to []." if final else '')
 
+def use_extracts(item, s, p, heads):
+    """If the AI writing step is unavailable, report what the articles say (Tavily's own summary, else the opening sentences of the articles) instead of headlines."""
+    evidence = ' '.join(h['title'] + ' ' + h.get('content', '') for h in heads)
+    text = keep_supported(ANS.get((s['t'], item.get('after', '')), ''), evidence, p)
+    if not text:
+        key = {short_name(s['n']).lower().split()[0], s['t'].lower()}; out = []
+        for h in heads[:4]:
+            for sent in re.split(r'(?<=[.!?])\s+', h.get('content', '')):
+                if len(sent) > 50 and any(k in sent.lower() for k in key): out.append(sent.strip()); break
+        text = keep_supported(' '.join(out[:2]), evidence, p)
+    if not text: return item
+    top = heads[:3]; trusted = list(dict.fromkeys(h['domain'] for h in top if h.get('trusted')))
+    item.update(reason=text, headline=item['n'], certainty='low', via='extracts', why_none='',
+                confidence='multiple' if len(trusted) >= 2 else 'single' if len(trusted) == 1 else 'unverified',
+                sources=[{'title': h['title'], 'source': h['source'], 'url': h['url'], 'date': h['date']} for h in top])
+    return item
+
 def explain(s, p, per):
     """Researches one stock. confidence = how many trusted sources back it (multiple | single | unverified), or none."""
     w = 'today' if per == 'd' else 'this week'
     move = f"{'rose' if p >= 0 else 'fell'} {abs(p):.1f} percent {w}"; date = s['rows'][-1][0]
     item = {'t': s['t'], 'n': s['n'], 'move': move, 'pct': round(p, 1), 'reason': None, 'headline': None, 'confidence': 'none', 'certainty': '', 'driver': '', 'developments': [], 'analyst_views': [], 'outlook': '',
-            'sources': [], 'why_none': '', 'why_detail': '', 'found': 0, 'headlines': [], 'counts': {}, 'evidence': ''}
+            'sources': [], 'why_none': '', 'why_detail': '', 'found': 0, 'headlines': [], 'counts': {}, 'evidence': '', 'after': '', 'via': ''}
     after = (dt.date.fromisoformat(date) - dt.timedelta(days=1 if per == 'd' else 8)).isoformat()   # anchored to the day of the move
-    name = short_name(s['n'])
+    name = short_name(s['n']); item['after'] = after
     try: heads, counts = NEWS_CACHE.setdefault((s['t'], after, per), gather(name, s['t'], after, p))
     except Exception as e:
         print('news fetch failed for', s['t'], repr(e)); item['why_none'] = 'fetch_failed'; return item
@@ -275,12 +326,13 @@ def explain(s, p, per):
     if not heads: item['why_none'] = 'no_headlines'; return item
     ans = ask_llm(prompt(s, move, date, heads, False))
     if not isinstance(ans, dict) or not str(ans.get('summary') or '').strip():
-        item['why_none'] = 'model_unavailable' if not isinstance(ans, dict) else 'model_no_reason'; item['why_detail'] = LLM_ERR if not isinstance(ans, dict) else ''; return item
+        item['why_none'] = 'model_unavailable' if not isinstance(ans, dict) else 'model_no_reason'; item['why_detail'] = LLM_ERR if not isinstance(ans, dict) else ''
+        return use_extracts(item, s, p, heads)
     qs = [q.strip()[:120] for q in (ans.get('follow_up_queries') or []) if isinstance(q, str) and q.strip()][:2]
     if qs and ans.get('certainty') != 'high' and TAVILY_KEY and not NEWS_FAKE:      # a second round of research when the first was not conclusive
         more = []
         for q in qs:
-            try: more += tavily_search(q if name.lower() in q.lower() else f"{name} {q}", days_since(after), 'basic', 5)
+            try: more += tavily_search(q if name.lower() in q.lower() else f"{name} {q}", days_since(after), 'basic', 5)[0]
             except Exception as e: print(f"{s['t']}: follow-up search failed", repr(e))
         item['counts']['follow_ups'] = len(qs)
         heads = tidy(heads + more, after)[:14]; item['found'] = len(heads)
@@ -296,7 +348,7 @@ def explain(s, p, per):
         fixed = str(fix.get('summary') or '').strip() if isinstance(fix, dict) else ''
         first = re.split(r'(?<=[.!?])\s+', summary)[0]
         summary = fixed if fixed and numbers_ok(fixed, evidence, p) else (keep_supported(summary, evidence, p) if numbers_ok(first, evidence, p) else '')
-    if not summary: item['why_none'] = 'numbers_dropped'; return item
+    if not summary: item['why_none'] = 'numbers_dropped'; return use_extracts(item, s, p, heads)
     trusted = list(dict.fromkeys(h['domain'] for h in chosen if h.get('trusted')))
     item.update(reason=summary, headline=str(ans.get('headline') or s['n'])[:80], certainty=str(ans.get('certainty') or 'medium'), driver=str(ans.get('driver') or ''),
                 developments=clean(ans.get('developments')), analyst_views=clean(ans.get('analyst_views')), outlook=(clean([ans.get('outlook')]) or [''])[0],
