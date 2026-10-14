@@ -6,7 +6,7 @@ SYD = ZoneInfo('Australia/Sydney'); ROOT = os.path.dirname(os.path.abspath(__fil
 try: SECRETS = json.loads(os.environ.get('SECRETS_JSON') or '{}')
 except Exception: SECRETS = {}
 KEY = os.environ.get('EODHD_KEY') or SECRETS.get('EODHD_KEY', ''); FAKE = os.environ.get('EODHD_FAKE') == '1'; TTS = os.environ.get('TTS', 'on'); VOICE = os.environ.get('VOICE', 'bm_george')
-NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1-mini'); WRITER_MODEL = os.environ.get('WRITER_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', ''); GEMINI_KEY = os.environ.get('GEMINI_KEY') or SECRETS.get('GEMINI_KEY', '')
+NEWS_FAKE = os.environ.get('NEWS_FAKE') == '1'; MODEL = os.environ.get('NEWS_MODEL', 'openai/gpt-4.1-mini'); WRITER_MODEL = os.environ.get('WRITER_MODEL', 'openai/gpt-4.1'); GH_TOKEN = os.environ.get('GITHUB_TOKEN') or SECRETS.get('github_token', ''); TAVILY_KEY = os.environ.get('TAVILY_KEY') or SECRETS.get('TAVILY_KEY', ''); GEMINI_KEY = os.environ.get('GEMINI_KEY') or SECRETS.get('GEMINI_KEY', ''); GROQ_KEY = os.environ.get('GROQ_KEY') or SECRETS.get('GROQ_KEY', '')
 
 def watchlist():
     out = []
@@ -221,7 +221,7 @@ def gemini(system, user, max_tokens, strong=False):
         for attempt in range(3):
             body = json.dumps({'systemInstruction': {'parts': [{'text': system}]}, 'contents': [{'role': 'user', 'parts': [{'text': user}]}],
                                'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 8192, 'responseMimeType': 'application/json'}}).encode()
-            req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent', data=body, headers={'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY})
+            req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent', data=body, headers={'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY, 'User-Agent': 'briefing-job/1.0'})
             try:
                 with urllib.request.urlopen(req, timeout=120) as r: data = json.load(r)
                 text = data['candidates'][0]['content']['parts'][0]['text']; time.sleep(2)
@@ -240,6 +240,34 @@ def gemini(system, user, max_tokens, strong=False):
                 LLM_ERR = f'gemini {m}: {e!r}'[:200]; print('model call failed:', LLM_ERR); time.sleep(5 * (attempt + 1))
     return None
 
+def groq(system, user, max_tokens):
+    """Groq (free key from console.groq.com, email sign-up). Used after Gemini and before GitHub Models when a GROQ_KEY secret exists."""
+    global LLM_ERR
+    import time
+    for m in ('llama-3.3-70b-versatile', 'llama-3.1-8b-instant'):
+        for attempt in range(4):
+            body = json.dumps({'model': m, 'temperature': 0.2, 'max_tokens': min(max_tokens, 4000), 'response_format': {'type': 'json_object'},
+                               'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}).encode()
+            req = urllib.request.Request('https://api.groq.com/openai/v1/chat/completions', data=body, headers={
+                'Authorization': 'Bearer ' + GROQ_KEY, 'Content-Type': 'application/json', 'User-Agent': 'briefing-job/1.0'})
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r: text = json.load(r)['choices'][0]['message']['content']
+                time.sleep(25)                                              # stay under the free tokens-per-minute limit
+                text = re.sub(r'^```(?:json)?|```$', '', text.strip()).strip()
+                return json.loads(text[text.index('{'): text.rindex('}') + 1])
+            except urllib.error.HTTPError as e:
+                detail = ''
+                try: detail = e.read().decode('utf-8', 'replace')[:160].replace('\n', ' ')
+                except Exception: pass
+                LLM_ERR = f'groq {m}: HTTP {e.code} {detail}'.strip(); print('model call failed:', LLM_ERR)
+                if e.code == 429: time.sleep(min(int(e.headers.get('Retry-After') or 30 * (attempt + 1)) + 2, 90)); continue
+                if e.code in (400, 404, 413, 422): break                    # too big or not accepted: try the next model
+                if e.code in (401, 403): return None
+                time.sleep(5)
+            except Exception as e:
+                LLM_ERR = f'groq {m}: {e!r}'[:200]; print('model call failed:', LLM_ERR); time.sleep(5 * (attempt + 1))
+    return None
+
 def chat(system, user, model, max_tokens=2200):
     """One call to GitHub Models. Paces itself, respects rate limits, falls back to other models, and remembers the last error."""
     global LLM_ERR
@@ -248,12 +276,15 @@ def chat(system, user, model, max_tokens=2200):
     if GEMINI_KEY:
         got = gemini(system, user, max_tokens, strong=(model == WRITER_MODEL))
         if got is not None: return got
+    if GROQ_KEY:
+        got = groq(system, user, max_tokens)
+        if got is not None: return got
     for m in [model] + [x for x in FALLBACK_MODELS if x != model]:
         for attempt in range(3):
             body = json.dumps({'model': m, 'temperature': 0.2, 'max_tokens': max_tokens, 'response_format': {'type': 'json_object'},
                                'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}).encode()
             req = urllib.request.Request('https://models.github.ai/inference/chat/completions', data=body, headers={
-                'Authorization': 'Bearer ' + GH_TOKEN, 'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+                'Authorization': 'Bearer ' + GH_TOKEN, 'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'briefing-job/1.0'})
             try:
                 with urllib.request.urlopen(req, timeout=120) as r: text = json.load(r)['choices'][0]['message']['content']
                 time.sleep(4)                                               # stay under the free per-minute limit
